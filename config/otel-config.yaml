@@ -1,0 +1,320 @@
+receivers:
+  filelog:
+    include:
+      # --- PH‑EE connectors (unchanged)
+      - /var/log/pods/paymenthub_ph-ee-connector-*-*/*/*.log
+
+      # --- Zeebe broker logs (robust to depth)
+      - /var/log/pods/paymenthub_phee-zeebe-*/**/zeebe/*.log
+
+      # --- Zeebe gateway logs (robust to depth)
+      - /var/log/pods/paymenthub_phee-zeebe-gateway-*/**/zeebe-gateway/*.log
+
+      # --- CRI container symlinks (extra safety net)
+      - /var/log/containers/phee-zeebe-gateway-*_paymenthub_zeebe-gateway-*.log
+
+      # --- Ops App (unchanged)
+      - /var/log/pods/paymenthub_ph-ee-operations-app-*/*/*.log
+      # ingress-nginx: match both the PODS path and (if present) the containers symlink
+      - /var/log/pods/default_ingress-nginx-controller-*/controller/*.log
+      - /var/log/containers/ingress-nginx-controller-*_default_controller-*.log
+
+    exclude:
+      # Keep infra noise out
+      - /var/log/pods/paymenthub_phee-kibana-*/*/*.log
+      - /var/log/pods/paymenthub_elasticsearch-*/*/*.log
+      - /var/log/containers/*kibana*.log
+      - /var/log/containers/*elastic*.log
+
+    start_at: end
+    include_file_path: true
+
+    operators:
+      # --- Base: strip CRI envelope & keep a raw copy of the line --------------------------
+      - type: container
+        id: parse_container
+
+      - type: regex_parser
+        id: snapshot_raw_line
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        regex: '^(?P<raw_line>.*)$'
+
+      # --- Java (Channel/Connectors) with DATE+TIME ----------------------------------------
+      - type: regex_parser
+        id: parse_channel_date
+        if: 'body matches "^[0-9]{2}-[0-9]{2}-[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}"'
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        regex: '^(?P<app_time>[0-9]{2}-[0-9]{2}-[0-9]{4} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3})[[:space:]]+(?:\x1b\[[0-9;]*m)*\[(?P<thread>[^\]]+)\](?:\x1b\[[0-9;]*m)*[[:space:]]+(?:\x1b\[[0-9;]*m)*(?P<level>[A-Z]+)(?:\x1b\[[0-9;]*m)*[[:space:]]+(?:\x1b\[[0-9;]*m)*(?P<logger>.+?)[[:space:]]+-[[:space:]]+(?P<message>.*)$'
+
+      - type: time_parser
+        id: ts_from_channel_date
+        if: 'attributes.app_time != nil'
+        parse_from: attributes.app_time
+        layout_type: strptime
+        layout: '%d-%m-%Y %H:%M:%S.%L'
+        on_error: send
+
+      # --- Java (Channel/Connectors) with TIME ONLY ----------------------------------------
+      - type: regex_parser
+        id: parse_channel_timeonly
+        if: 'body matches "^[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}"'
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        regex: '^(?P<app_time_hms>[0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3})[[:space:]]+(?:\x1b\[[0-9;]*m)*(?P<level>[A-Z]+)(?:\x1b\[[0-9;]*m)*[[:space:]]+(?:\x1b\[[0-9;]*m)*\[(?P<thread>[^\]]+)\](?:\x1b\[[0-9;]*m)*[[:space:]]+(?:\x1b\[[0-9;]*m)*(?P<logger>.+?)[[:space:]]+-[[:space:]]+(?P<message>.*)$'
+
+      - type: regex_parser
+        id: strip_ansi_from_logger
+        if: 'attributes.logger != nil'
+        parse_from: attributes.logger
+        parse_to: attributes
+        on_error: send
+        regex: '^(?:\x1b\[[0-9;]*m)*\s*(?P<logger_clean>.+?)\s*$'
+
+      - type: move
+        if: 'attributes.logger_clean != nil'
+        from: attributes.logger_clean
+        to: attributes.logger
+
+      # --- Zeebe/Gateway line format (YYYY-MM-DD …) ---------------------------------------
+      - type: regex_parser
+        id: parse_zeebe_line
+        if: 'body matches "^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3}"'
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        regex: '^(?P<app_time_zeebe>[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}[.][0-9]{3})[[:space:]]+\[(?P<context1>[^\]]+)\][[:space:]]+\[(?P<context2>[^\]]+)\][[:space:]]+\[(?P<context3>[^\]]+)\][[:space:]]+(?P<level>[A-Z]+)[[:space:]]*(?P<message>.*)$'
+
+      - type: time_parser
+        id: ts_from_zeebe
+        if: 'attributes.app_time_zeebe != nil'
+        parse_from: attributes.app_time_zeebe
+        layout_type: strptime
+        layout: '%Y-%m-%d %H:%M:%S.%L'
+        on_error: send
+
+      # --- Severity mapping ---------------------------------------------------------------
+      - type: severity_parser
+        id: sev_from_level
+        if: 'attributes.level != nil'
+        parse_from: attributes.level
+        mapping:
+          trace: [TRACE]
+          debug: [DEBUG]
+          info:  [INFO]
+          warn:  [WARN]
+          error: [ERROR]
+          fatal: [FATAL]
+
+      # --- Ensure inbound logger/message present if strict parser missed -------------------
+      - type: regex_parser
+        id: fallback_inbound_from_body
+        if: 'attributes.logger == nil and body matches "(?:inbound-)?transaction-request[.]log"'
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        regex: '.*?(?P<logger>(?:inbound-)?transaction-request[.]log)[[:space:]]*[-:][[:space:]]*(?P<message>.*)$'
+
+      # --- Channel payload extraction ------------------------------------------------------
+      - type: regex_parser
+        id: extract_root_payload_from_raw
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.raw_line != nil and attributes.raw_line matches "clientRefId"'
+        regex: '(?P<payload_root>\{"clientRefId".*\})'
+
+      - type: json_parser
+        id: parse_payload_root_json
+        parse_from: attributes.payload_root
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.payload_root != nil'
+
+      - type: regex_parser
+        id: clientref_from_raw
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.clientRefId == nil and attributes.raw_line matches "clientRefId"'
+        regex: '"clientRefId"[[:space:]]*:[[:space:]]*"(?P<clientRefId>[^"]+)"'
+
+      # --- Tenant inference ---------------------------------------------------------------
+      - type: regex_parser
+        id: extract_process_suffix
+        parse_from: attributes.message
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.message != nil and attributes.message matches "process "'
+        regex: "process '?(?P<process>[A-Za-z0-9_-]+-[A-Za-z0-9_-]+)'?"
+
+      - type: regex_parser
+        id: tenant_from_process
+        parse_from: attributes.process
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.process != nil and attributes.tenant_id == nil'
+        regex: '.*-(?P<tenant_id>[A-Za-z0-9_-]+)$'
+
+      - type: regex_parser
+        id: tenant_from_raw_fspid
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.tenant_id == nil and attributes.raw_line matches "fspId"'
+        regex: '"fspId"[[:space:]]*:[[:space:]]*"(?P<tenant_id>[^"]+)"'
+
+      # --- WHOLE‑HUB correlation extractors -----------------------------------------------
+      - type: regex_parser
+        id: extract_zeebe_start
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.raw_line != nil and attributes.raw_line matches "workflow instance from process"'
+        regex: "workflow instance from process (?P<process>[A-Za-z0-9_-]+) started with transactionId (?P<transactionId>[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12}), instance key: (?P<zeebe_instance_key>[0-9]{10,20})"
+
+      - type: regex_parser
+        id: extract_job_started
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: "attributes.raw_line != nil and attributes.raw_line matches 'Job .* started from process '"
+        regex: "Job '(?P<job_name>[^']+)' started from process '(?P<process>[^']+)' with key (?P<zeebe_job_key>[0-9]{10,20})"
+
+      - type: regex_parser
+        id: tenant_from_process_after_job
+        parse_from: attributes.process
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.process != nil and attributes.tenant_id == nil'
+        regex: '.*-(?P<tenant_id>[A-Za-z0-9_-]+)$'
+
+      - type: regex_parser
+        id: transactionId_anywhere
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.transactionId == nil and attributes.raw_line matches "[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12}"'
+        regex: "(?P<transactionId>[0-9a-fA-F-]{8}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{4}-[0-9a-fA-F-]{12})"
+
+      - type: regex_parser
+        id: zeebe_instance_key_generic
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.zeebe_instance_key == nil and attributes.raw_line matches "instance key"'
+        regex: "instance key:?[[:space:]]*(?P<zeebe_instance_key>[0-9]{10,20})"
+
+      - type: regex_parser
+        id: zeebe_job_key_generic
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.zeebe_job_key == nil and attributes.raw_line matches "with key"'
+        regex: "with key (?P<zeebe_job_key>[0-9]{10,20})"
+
+      - type: regex_parser
+        id: zeebe_gateway_partition_error
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.message != nil and attributes.message matches "writer is full"'
+        regex: "partition '(?P<zeebe_partition>[0-9]+)'.*writer is full"
+
+      - type: regex_parser
+        id: gw_backpressure_raw
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.raw_line != nil and attributes.raw_line matches "Failed to write client request|writer is full"'
+        regex: 'Received error from broker \((?P<zeebe_error_code>[A-Z_]+)\): Failed to write client request to partition [''"]?(?P<zeebe_partition>[0-9]+)[''"]?, because the writer is full'
+
+      - type: regex_parser
+        id: gw_backpressure_body
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.zeebe_partition == nil and body != nil and body matches "Failed to write client request|writer is full"'
+        regex: 'Received error from broker \((?P<zeebe_error_code>[A-Z_]+)\): Failed to write client request to partition [''"]?(?P<zeebe_partition>[0-9]+)[''"]?, because the writer is full'
+
+      - type: regex_parser
+        id: gw_backpressure_partition_fallback
+        parse_from: attributes.raw_line
+        parse_to: attributes
+        on_error: send
+        if: 'attributes.zeebe_partition == nil and attributes.raw_line != nil and attributes.raw_line matches "partition"'
+        regex: 'partition [''"]?(?P<zeebe_partition>[0-9]+)[''"]?'
+
+      # --- Ops App latency & request info (fixed indentation) ------------------------------
+      - type: regex_parser
+        id: parse_ops_total
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+        # Only for Ops‑App lines produced by the TenantAwareHeaderFilter logger
+        if: 'attributes["k8s.container.name"] == "ph-ee-operations-app" and attributes.logger != nil and attributes.logger matches "TenantAwareHeaderFilter[.]doFilter" and body matches "total:"'
+        regex: 'total:\s*(?P<ops_total>[0-9]+)\s*--\s*method:\s*(?P<http_method>[A-Z]+)\s*--\s*url:\s*(?P<http_url>\S+)'
+
+      - type: move
+        if: 'attributes.http_method != nil'
+        from: attributes.http_method
+        to: attributes.method
+
+      - type: move
+        if: 'attributes.http_url != nil'
+        from: attributes.http_url
+        to: attributes.url
+
+      # --- Ingress controller: parse JSON lines only ---------------------------------------
+      - type: json_parser
+        id: parse_ingress_json
+        if: 'attributes["k8s.container.name"] == "controller" and body matches "^[[:space:]]*\\{"'
+        parse_from: body
+        parse_to: attributes
+        on_error: send
+
+      # --- Keep Kibana message readable (do this LAST) -------------------------------------
+      - type: move
+        from: attributes.message
+        to: body
+        if: 'attributes.message != nil'
+
+processors:
+  k8sattributes:
+    passthrough: false
+    extract:
+      metadata:
+        - k8s.namespace.name
+        - k8s.pod.name
+        - k8s.container.name
+        - k8s.pod.uid
+  attributes:
+    actions:
+      - action: upsert
+        key: data_stream.dataset
+        value: ph-ee
+      - action: upsert
+        key: data_stream.namespace
+        value: paymenthub
+  batch: {}
+
+exporters:
+  logging:
+    verbosity: normal
+  elasticsearch:
+    endpoints: ["http://elasticsearch-master:9200"]
+
+extensions:
+  health_check: {}
+
+service:
+  extensions: [health_check]
+  pipelines:
+    logs:
+      receivers: [filelog]
+      processors: [k8sattributes, attributes, batch]
+      exporters: [elasticsearch, logging]

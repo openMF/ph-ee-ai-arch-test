@@ -1,0 +1,60 @@
+{
+  "index_patterns": [
+    "ph-ee-ai-alerts*"
+  ],
+  "data_stream": {},
+  "template": {
+    "mappings": {
+      "dynamic_templates": [
+        {
+          "rule_fields": {
+            "path_match": "rule.*",
+            "mapping": {
+              "type": "keyword"
+            }
+          }
+        }
+      ],
+      "properties": {
+        "@timestamp": {
+          "type": "date"
+        },
+        "type": {
+          "type": "keyword"
+        },
+        "pattern_id": {
+          "type": "keyword"
+        },
+        "title": {
+          "type": "keyword"
+        },
+        "component": {
+          "type": "keyword"
+        },
+        "environment": {
+          "type": "keyword"
+        },
+        "ai_score": {
+          "type": "float"
+        },
+        "ts_minute": {
+          "type": "date"
+        },
+        "what_next": {
+          "type": "text"
+        },
+        "fingerprint": {
+          "type": "keyword"
+        },
+        "evidence": {
+          "type": "object",
+          "enabled": true
+        }
+      }
+    }
+  },
+  "priority": 300,
+  "_meta": {
+    "description": "PH-EE AI alerts data stream template"
+  }
+}

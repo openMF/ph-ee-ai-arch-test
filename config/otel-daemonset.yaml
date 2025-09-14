@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector-daemonset
+  namespace: paymenthub
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.96.0
+          args: ["--config=/etc/otel-config.yaml"]
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/otel-config.yaml
+              subPath: otel-config.yaml
+            - name: host-logs
+              mountPath: /var/log/pods
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: otel-collector-config
+        - name: host-logs
+          hostPath:
+            path: /var/log/pods
