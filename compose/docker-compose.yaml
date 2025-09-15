@@ -1,0 +1,40 @@
+version: "3.9"
+
+services:
+  ai-alert-bot:
+    image: python:3.11-slim
+    container_name: ai-alert-bot
+    working_dir: /app
+    volumes:
+      - ./:/app:ro
+    environment:
+      # --- Data sources ---
+      ES_URL: ${ES_URL:-http://localhost:9200}
+      ES_USER: ${ES_USER:-}
+      ES_PASS: ${ES_PASS:-}
+
+      # --- Slack (use one: webhook or bot token) ---
+      SLACK_WEBHOOK: ${SLACK_WEBHOOK:-}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:-}
+      SLACK_CHANNEL: ${SLACK_CHANNEL:-#paymenthub_bot_alert}
+      SLACK_MENTION: ${SLACK_MENTION:-<!channel>}
+
+      # --- Bot behavior ---
+      LOOP_SEC: ${LOOP_SEC:-30}
+      COOLDOWN_MIN: ${COOLDOWN_MIN:-10}
+      BACKPRESSURE_MIN: ${BACKPRESSURE_MIN:-1}
+      CLIENTSTATUS_MIN: ${CLIENTSTATUS_MIN:-3}
+      OPS_P95_MS: ${OPS_P95_MS:-1500}
+      PAYLOAD_ALERTS_MIN: ${PAYLOAD_ALERTS_MIN:-1}
+      CHANNEL_ERR_PER_MIN: ${CHANNEL_ERR_PER_MIN:-10}
+      KEYCLOAK_ERR_PER_MIN: ${KEYCLOAK_ERR_PER_MIN:-5}
+      ALLOWED_CURRENCIES: ${ALLOWED_CURRENCIES:-CAD,USD,EUR,KES,UGX,GNF}
+
+    # Give the container access to host's 127.0.0.1 for port-forwards
+    network_mode: host
+
+    # Minimal dependency
+    command: >
+      sh -lc "pip install --no-cache-dir -r requirements.txt &&
+                python ai/ai_alert_bot.py"
+    restart: unless-stopped

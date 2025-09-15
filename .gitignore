@@ -1,0 +1,9 @@
+
+# IDE
+.idea/
+.venv/
+__pycache__/
+*.pyc
+.idea/
+.env
+ai/models/

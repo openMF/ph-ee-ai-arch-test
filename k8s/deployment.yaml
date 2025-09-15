@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ph-ee-ai-alert-bot
+  labels: {app: ph-ee-ai-alert-bot}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: ph-ee-ai-alert-bot}}
+  template:
+    metadata:
+      labels: {app: ph-ee-ai-alert-bot}
+    spec:
+      containers:
+      - name: bot
+        image: ghcr.io/norbline/ph-ee-ai-arch-test/ph-ee-ai-bot:0.1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: ES_URL
+          value: "http://elasticsearch-master:9200"
+        - name: LOOP_SEC
+          value: "60"
+        - name: COOLDOWN_MIN
+          value: "10"
+        - name: OPS_P95_MS
+          value: "1500"
+        - name: BACKPRESSURE_MIN
+          value: "1"
+        - name: CLIENTSTATUS_MIN
+          value: "5"
+        - name: PAYLOAD_ALERTS_MIN
+          value: "1"
+        - name: SLACK_WEBHOOK
+          valueFrom:
+            secretKeyRef:
+              name: slack-webhook
+              key: SLACK_WEBHOOK

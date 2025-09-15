@@ -1,0 +1,33 @@
+# otel-values.yaml
+mode: daemonset
+
+image:
+  repository: otel/opentelemetry-collector-contrib  # Must use contrib version for filelog/elasticsearch
+  tag: "0.128.0"
+
+ports:
+  metrics:
+    enabled: false  # Disable default metrics port to avoid conflicts
+  health_check:
+    enabled: false  # Disable if not needed
+
+configMap:
+  existingConfigMap: otel-collector-config
+
+extraVolumes:
+  - name: varlogpods
+    hostPath:
+      path: /var/log/pods
+
+extraVolumeMounts:
+  - name: varlogpods
+    mountPath: /var/log/pods
+    readOnly: true
+
+resources:
+  limits:
+    memory: 1Gi
+    cpu: 1
+  requests:
+    memory: 512Mi
+    cpu: 500m
